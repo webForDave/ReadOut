@@ -20,7 +20,9 @@ from django.core.files.base import ContentFile
 import os
 from django.conf import settings
 from django.http import JsonResponse
-import hashlib 
+import hashlib
+
+gtts_lock = threading.Lock()
 
 def home(request):
     return render(request, 'core/home.html')
@@ -73,7 +75,7 @@ def convert_text(request):
             conversion = form.save(commit=False)
             conversion.user = request.user
             conversion.save()
-            
+
             threading.Thread(target=process_conversion, args=(conversion,)).start()
             
             return redirect('conversion_result', conversion_id=conversion.id)
@@ -105,9 +107,16 @@ def process_conversion(conversion_obj):
 
         if not os.path.exists(audio_path):
             print(f"No cached file found. Generating new audio for: {unique_id}")
-            tts = gTTS(text=text_to_convert, lang='en')
-            os.makedirs(os.path.dirname(audio_path), exist_ok=True)
-            tts.save(audio_path)
+
+            with gtts_lock:
+                if not os.path.exists(audio_path):
+                    try:
+                        tts = gTTS(text=text_to_convert, lang='en')
+                        os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+                        tts.save(audio_path)
+                    except Exception as e:
+                        print(f"gTTS API call failed: {e}")
+                        raise e
         else:
             print(f"Cached file found. Serving audio from cache for: {unique_id}")
 
@@ -134,9 +143,9 @@ def conversion_result(request, conversion_id):
 def check_audio_status(request, conversion_id):
     try:
         conversion = Conversion.objects.get(id=conversion_id, user=request.user)
-        if conversion.input_text.startswith('Error:'):
+        if conversion.input_text and conversion.input_text.startswith('Error:'):
             return JsonResponse({'audio_ready': False, 'error': conversion.input_text})
-        if conversion.audio_file:
+        if conversion.audio_file and conversion.audio_file.name:
             return JsonResponse({'audio_ready': True, 'audio_url': conversion.audio_file.url})
         return JsonResponse({'audio_ready': False})
     except Conversion.DoesNotExist:
