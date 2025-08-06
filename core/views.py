@@ -16,9 +16,11 @@ import PyPDF2
 import threading
 from gtts import gTTS
 from django.core.files import File
+from django.core.files.base import ContentFile
 import os
 from django.conf import settings
 from django.http import JsonResponse
+import hashlib 
 
 def home(request):
     return render(request, 'core/home.html')
@@ -71,37 +73,53 @@ def convert_text(request):
             conversion = form.save(commit=False)
             conversion.user = request.user
             conversion.save()
-            def process_conversion(conversion_obj):
-                try:
-                    if conversion_obj.pdf_file:
-                        pdf_reader = PyPDF2.PdfReader(conversion_obj.pdf_file)
-                        text = ''
-                        for page in pdf_reader.pages:
-                            extracted = page.extract_text()
-                            if extracted:
-                                text += extracted + ' '
-                        conversion_obj.input_text = text.strip()
-                    if not conversion_obj.input_text:
-                        conversion_obj.input_text = "No text provided."
-                    text_to_convert = preprocess_pidgin(conversion_obj.input_text) if conversion_obj.language == 'pidgin' else conversion_obj.input_text
-                    tts = gTTS(text=text_to_convert, lang='en')
-                    audio_path = os.path.join(settings.MEDIA_ROOT, 'audio', f'conversion_{conversion_obj.id}.mp3')
-                    os.makedirs(os.path.dirname(audio_path), exist_ok=True)
-                    tts.save(audio_path)
-                    with open(audio_path, 'rb') as f:
-                        conversion_obj.audio_file.save(f'conversion_{conversion_obj.id}.mp3', File(f))
-                    conversion_obj.save()
-                except Exception as e:
-                    print(f"Error processing conversion: {e}")
-                    conversion_obj.input_text = f"Error: {str(e)}"
-                    conversion_obj.save()
+            
             threading.Thread(target=process_conversion, args=(conversion,)).start()
+            
             return redirect('conversion_result', conversion_id=conversion.id)
         else:
             messages.error(request, 'Invalid input. Please check the form: ' + str(form.errors))
     else:
         form = ConversionForm()
     return render(request, 'core/convert_text.html', {'form': form})
+
+def process_conversion(conversion_obj):
+    try:
+        if conversion_obj.pdf_file:
+            pdf_reader = PyPDF2.PdfReader(conversion_obj.pdf_file)
+            text = ''
+            for page in pdf_reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + ' '
+            conversion_obj.input_text = text.strip()
+        
+        if not conversion_obj.input_text:
+            conversion_obj.input_text = "No text provided."
+        
+        text_to_convert = preprocess_pidgin(conversion_obj.input_text) if conversion_obj.language == 'pidgin' else conversion_obj.input_text
+        
+        unique_id = hashlib.md5((text_to_convert + conversion_obj.language).encode('utf-8')).hexdigest()
+        audio_filename = f'{unique_id}.mp3'
+        audio_path = os.path.join(settings.MEDIA_ROOT, 'audio', audio_filename)
+
+        if not os.path.exists(audio_path):
+            print(f"No cached file found. Generating new audio for: {unique_id}")
+            tts = gTTS(text=text_to_convert, lang='en')
+            os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+            tts.save(audio_path)
+        else:
+            print(f"Cached file found. Serving audio from cache for: {unique_id}")
+
+        with open(audio_path, 'rb') as f:
+            conversion_obj.audio_file.save(audio_filename, ContentFile(f.read()))
+
+        conversion_obj.save()
+        
+    except Exception as e:
+        print(f"Error processing conversion: {e}")
+        conversion_obj.input_text = f"Error: {str(e)}"
+        conversion_obj.save()
 
 @login_required
 def conversion_result(request, conversion_id):
